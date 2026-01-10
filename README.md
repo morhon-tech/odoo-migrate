@@ -1,31 +1,42 @@
 # Odoo 迁移工具
 
+![GitHub](https://img.shields.io/badge/Ubuntu-24.04%2B-orange)
 ![GitHub](https://img.shields.io/badge/Odoo-17.0%2B-brightgreen)
-![GitHub](https://img.shields.io/badge/PostgreSQL-12%2B-blue)
-![GitHub](https://img.shields.io/badge/Python-3.8%2B-blue)
-![GitHub](https://img.shields.io/badge/Version-2.1.0-blue)
+![GitHub](https://img.shields.io/badge/PostgreSQL-14%2B-blue)
+![GitHub](https://img.shields.io/badge/Redis-6.0%2B-red)
+![GitHub](https://img.shields.io/badge/Python-3.10%2B-blue)
+![GitHub](https://img.shields.io/badge/Version-2.2.0-blue)
 ![GitHub](https://img.shields.io/github/license/morhon-tech/odoo-migrate)
 ![GitHub](https://img.shields.io/github/stars/morhon-tech/odoo-migrate)
 ![GitHub](https://img.shields.io/github/forks/morhon-tech/odoo-migrate)
 ![GitHub](https://img.shields.io/github/issues/morhon-tech/odoo-migrate)
 
-专为Odoo系统设计的智能迁移工具，支持源码和Docker两种部署方式的完整环境迁移。一键完成从旧服务器到新服务器的完整迁移，包含数据库、文件存储、源码和配置。
+专为Ubuntu系统设计的Odoo智能迁移工具，支持源码部署方式的完整环境迁移。一键完成从旧服务器到新服务器的完整迁移，包含数据库、文件存储、完整源码和配置。
 
 > 🌟 **如果这个项目对您有帮助，请给我们一个Star！** [⭐ Star this project](https://github.com/morhon-tech/odoo-migrate)
 
 ## 🎯 核心特性
 
 - ✅ **智能环境检测** - 自动识别Odoo版本、配置和依赖
-- ✅ **完整备份恢复** - 包含源码、数据库、文件存储和自定义模块
-- ✅ **双部署模式** - 支持源码部署和Docker容器化部署
-- ✅ **自动优化配置** - 内置性能调优和安全加固
-- ✅ **Nginx反向代理** - 自动SSL证书和高性能配置
+- ✅ **完整源码备份** - 备份整个Odoo源码目录，包含所有修改
+- ✅ **源码完整恢复** - 使用备份的源码恢复，保持修改一致性
+- ✅ **Redis性能缓存** - 集成Redis提升系统性能
+- ✅ **全面系统优化** - PostgreSQL、Nginx、Odoo全方位优化
+- ✅ **Ubuntu专用** - 专为Ubuntu 24.04优化设计
 
 ## 📋 更新日志
 
+### v2.2.0 (2026-01-10)
+- **🎯 Ubuntu专用**: 专为Ubuntu 24.04 LTS优化，移除其他系统支持
+- **⚡ Redis集成**: 增加Redis缓存支持，显著提升会话和查询性能
+- **📦 完整源码**: 强制备份和恢复完整Odoo源码目录，防止修改丢失
+- **🚀 全面优化**: PostgreSQL、Redis、Nginx、Odoo四重性能优化
+- **🔒 安全增强**: 现代化SSL配置、安全头部、访问控制
+- **💾 智能缓存**: 多层缓存策略，静态文件、API、数据库查询全覆盖
+
 ### v2.1.0 (2026-01-08)
-- **重大优化**: 代码从2000行精简到900行，减少55%
-- **性能提升**: 备份和恢复速度提升30%
+- **代码精简**: 从2000行优化到900行，减少55%
+- **执行效率**: 备份和恢复速度提升30%
 - **错误处理**: 使用`set -euo pipefail`提供严格错误检查
 - **函数重构**: 合并重复函数，提高代码复用性
 - **安全增强**: 增强权限检查和输入验证
@@ -40,16 +51,16 @@
 
 ### v2.0.0 (2025-12-15)
 - 初始版本发布
-- 支持源码和Docker双模式恢复
+- 支持源码部署恢复
 - 集成Nginx反向代理配置
 - 自动SSL证书申请
 
 ## 🚀 安装和使用
 
 ### 环境要求
+- **操作系统**: Ubuntu 24.04 LTS (推荐) 或 Ubuntu 22.04 LTS
 - **原服务器**: 运行中的Odoo 17.0或18.0
-- **新服务器**: Ubuntu 20.04/22.04 或 Debian 11/12
-- **系统要求**: Python 3.8+, PostgreSQL 12+, 4GB+内存
+- **系统要求**: Python 3.10+, PostgreSQL 14+, Redis 6.0+, 4GB+内存
 - **网络**: 两台服务器之间可传输文件
 
 ### 快速开始
@@ -90,18 +101,20 @@ rsync -avzP odoo_backup_*.zip odoo-migrate.sh user@new-server:/home/user/
 ```bash
 chmod +x odoo-migrate.sh
 
-# 源码方式恢复（推荐）
+# 源码方式恢复
 ./odoo-migrate.sh restore
-
-# 或Docker方式恢复
-./odoo-migrate.sh restore docker
 ```
 
 #### 5. 配置域名访问（可选）
 ```bash
 # 配置Nginx反向代理和SSL
 ./odoo-migrate.sh nginx
-# 按提示输入域名和管理员邮箱
+# 根据Odoo用途选择部署模式：
+# 企业管理系统：
+#   1. 本地模式（推荐）- 直接回车，使用IP访问
+#   2. 二级域名模式（推荐）- 输入如 erp.company.com
+# 网站建设：
+#   3. 主域名模式（推荐）- 输入如 company.com
 ```
 
 #### 6. 检查状态
@@ -110,13 +123,96 @@ chmod +x odoo-migrate.sh
 ./odoo-migrate.sh status
 ```
 
+## 🌐 Nginx部署模式
+
+### 智能域名处理
+脚本支持三种Nginx部署模式，根据Odoo的用途和输入的域名自动配置相应的访问方式：
+
+#### 📊 企业管理系统用途（推荐模式）
+
+**1. 本地模式（推荐）**
+- **触发条件**: 域名输入为空（直接回车）
+- **访问方式**: `http://服务器IP`
+- **适用场景**: 企业内网环境，管理系统使用
+- **优势**: 访问速度快，安全性高，维护简单
+
+**2. 二级域名模式（推荐）**
+- **触发条件**: 输入二级域名（如 `erp.company.com`）
+- **访问方式**: `https://erp.company.com`
+- **适用场景**: 企业管理系统，远程办公
+- **优势**: 专业性强，便于管理，安全可控
+
+#### 🌐 网站建设用途（推荐模式）
+
+**3. 主域名模式（推荐）**
+- **触发条件**: 输入主域名（如 `company.com`）
+- **访问方式**: `https://company.com`
+- **适用场景**: 企业官网，电商网站，门户网站
+- **优势**: SEO友好，品牌展示，用户体验佳
+- **网站优化**: 页面缓存、图片优化、SEO头部、Gzip压缩
+
+### 智能域名处理逻辑
+
+| 输入域名 | 主访问域名 | 跳转规则 | SSL证书 | 推荐用途 |
+|---------|-----------|---------|---------|----------|
+| (空) | 服务器IP | 无跳转 | 无 | ✅ 企业管理（内网） |
+| `erp.company.com` | `erp.company.com` | 无跳转 | `erp.company.com` | ✅ 企业管理（远程） |
+| `manage.company.com` | `manage.company.com` | 无跳转 | `manage.company.com` | ✅ 企业管理（远程） |
+| `company.com` | `company.com` | `www.company.com → company.com` | `company.com` | ✅ 网站建设 |
+| `www.company.com` | `www.company.com` | `company.com → www.company.com` | `company.com` | ✅ 网站建设 |
+
+### 推荐域名示例
+
+**企业管理系统:**
+- `erp.company.com` - 企业资源规划
+- `manage.company.com` - 企业管理系统
+- `admin.company.com` - 管理后台
+- `office.company.com` - 办公系统
+
+**网站建设:**
+- `company.com` - 企业官网
+- `shop.company.com` - 电商网站
+- `www.company.com` - 门户网站
+
+### 网站建设模式专用优化
+
+当使用主域名模式时，脚本会自动启用网站建设专用优化：
+
+- ✅ **SEO优化**: 页面缓存、SEO友好头部、结构化数据支持
+- ✅ **性能优化**: 图片缓存30天、静态文件缓存7天、Gzip压缩
+- ✅ **用户体验**: 更大的上传限制(500M)、优化的超时设置
+- ✅ **缓存策略**: 首页缓存10分钟、页面缓存5分钟、图片缓存30天
+- ✅ **限流优化**: 网站访问限流相对宽松，支持更多并发用户
+
+### 企业管理模式专用优化
+
+当使用本地模式或二级域名模式时，脚本会启用管理系统专用优化：
+
+- ✅ **安全优化**: 严格的登录限流、API访问控制
+- ✅ **稳定性**: 长超时设置、大文件上传支持
+- ✅ **管理效率**: 优化的缓存策略、快速响应时间
+
+### 配置示例
+```bash
+# 企业管理：本地部署
+输入: (直接回车)
+访问: http://192.168.1.100 ✓ (内网管理)
+
+# 企业管理：远程部署
+输入: erp.company.com
+访问: https://erp.company.com ✓ (远程管理)
+
+# 网站建设：官网部署
+输入: company.com
+访问: https://company.com ✓ (企业官网)
+```
+
 ## 📖 命令参考
 
 | 命令 | 功能 | 说明 |
 |------|------|------|
 | `backup` | 备份当前环境 | 自动收集环境信息并打包 |
-| `restore` | 源码方式恢复 | 默认恢复方式，与原环境一致 |
-| `restore docker` | Docker方式恢复 | 容器化部署，便于管理 |
+| `restore` | 源码方式恢复 | 恢复到源码环境 |
 | `nginx` | 配置反向代理 | 自动SSL证书和高性能配置 |
 | `status` | 检查系统状态 | 显示服务状态和访问信息 |
 | `help` | 显示帮助 | 查看所有可用命令 |
@@ -128,10 +224,6 @@ chmod +x odoo-migrate.sh
 ./odoo-migrate.sh restore                   # 在新服务器恢复
 ./odoo-migrate.sh nginx                     # 配置域名访问
 ./odoo-migrate.sh status                    # 检查状态
-
-# Docker部署
-./odoo-migrate.sh restore docker            # Docker方式恢复
-cd /opt/odoo_docker && ./manage.sh status   # 查看Docker状态
 ```
 ## 🔧 故障排除和测试
 
@@ -160,39 +252,74 @@ curl -I https://your-domain.com             # 测试域名访问
 ```
 
 ### 兼容性测试
-- **操作系统**: Ubuntu 20.04/22.04, Debian 11/12
+- **操作系统**: Ubuntu 24.04 LTS (推荐), Ubuntu 22.04 LTS
 - **Odoo版本**: 17.0, 18.0
-- **数据库**: PostgreSQL 12+
-- **容器**: Docker 20.10+, Docker Compose 1.29+
+- **数据库**: PostgreSQL 14+
+- **缓存**: Redis 6.0+
 
 ## 📋 技术说明
 
 ### 优化详情
-- **删除冗余**: 重复函数定义、无效代码、未使用变量
-- **保留核心**: 智能检测、完整备份、双模式恢复、自动配置
-- **性能改进**: 高效文件操作、优化网络请求、减少内存占用、并发处理
-- **安全加固**: 输入验证、权限控制、路径安全、临时文件安全
+- **完整源码**: 强制备份整个Odoo源码目录，恢复时使用备份源码
+- **Redis缓存**: 集成Redis提供会话存储和缓存加速
+- **PostgreSQL优化**: 基于系统内存的全面数据库调优
+- **Nginx智能优化**: 根据用途自动选择管理系统或网站建设优化配置
+- **Odoo优化**: 多进程、内存限制、连接池、性能参数调优
+
+### Nginx优化配置
+
+**网站建设模式优化**:
+- 页面缓存: 首页10分钟，页面5分钟
+- 图片缓存: 30天长期缓存，支持WebP格式
+- SEO优化: 结构化头部、Gzip压缩、缓存控制
+- 性能优化: 大文件上传(500M)、优化超时设置
+- 用户体验: 宽松限流，支持高并发访问
+
+**企业管理模式优化**:
+- 安全优化: 严格登录限流、API访问控制
+- 稳定性: 长超时设置、大文件处理
+- 缓存策略: 静态文件7天、管理界面优化
+- 访问控制: 精确的权限管理和安全头部
 
 ### 备份内容
 ```
 odoo_backup_YYYYMMDD_HHMMSS.zip
-├── database/dump.sql           # 数据库转储
-├── filestore/                  # 文件存储
-├── source/odoo_core/          # Odoo源码
-├── source/custom_*/           # 自定义模块
-├── config/odoo.conf           # 配置文件
-└── metadata/versions.txt      # 版本信息
+├── database/dump.sql           # PostgreSQL数据库转储
+├── filestore/                  # 文件存储目录
+├── source/odoo_complete/       # 完整Odoo源码目录
+├── source/custom_*/           # 自定义模块目录
+├── config/odoo.conf           # Odoo配置文件
+├── config/redis.conf          # Redis配置文件
+└── metadata/versions.txt      # 版本和环境信息
 ```
 
-### 部署对比
+### 性能优化配置
 
-| 特性 | 源码部署 | Docker部署 |
-|------|----------|------------|
-| 性能 | 高 | 中等 |
-| 维护 | 复杂 | 简单 |
-| 自定义 | 灵活 | 受限 |
-| 资源占用 | 低 | 中等 |
-| 推荐场景 | 生产环境 | 开发测试 |
+**PostgreSQL优化** (基于8GB内存示例):
+- shared_buffers = 2GB (25% RAM)
+- effective_cache_size = 6GB (75% RAM)
+- work_mem = 128MB, maintenance_work_mem = 512MB
+- 并发查询和索引优化
+
+**Redis缓存配置**:
+- 会话存储: 替代文件系统会话存储
+- 查询缓存: 缓存频繁查询结果
+- 内存优化: 基于系统内存自动配置
+
+**Nginx智能优化**:
+
+*网站建设模式*:
+- 页面缓存 (首页10分钟, 页面5分钟)
+- 图片优化缓存 (30天)
+- SEO友好配置 (结构化头部, Gzip压缩)
+- 高并发支持 (宽松限流: 100次/秒)
+- 大文件上传 (500MB)
+
+*企业管理模式*:
+- 安全限流 (登录5次/分钟, API 30次/分钟)
+- 管理界面优化 (长超时, 稳定连接)
+- 静态文件缓存 (7天)
+- 访问控制 (严格的安全头部)
 ## ⚠️ 注意事项
 
 ### 使用前提
@@ -208,11 +335,11 @@ odoo_backup_YYYYMMDD_HHMMSS.zip
 4. 在测试环境验证完整流程
 
 ### 兼容性
+- **操作系统**: Ubuntu 24.04 LTS (推荐), Ubuntu 22.04 LTS
 - **Odoo版本**: 17.0, 18.0
-- **操作系统**: Ubuntu 20.04/22.04, Debian 11/12
-- **数据库**: PostgreSQL 12+
-- **容器**: Docker 20.10+, Docker Compose 1.29+
-- **内存要求**: 源码部署2GB+, Docker部署4GB+
+- **数据库**: PostgreSQL 14+
+- **缓存**: Redis 6.0+
+- **内存要求**: 4GB+ (推荐8GB+)
 
 ## 🏆 项目信息
 
@@ -250,7 +377,7 @@ odoo_backup_YYYYMMDD_HHMMSS.zip
 
 ### 作者信息
 - **开发团队**: Morhon Technology
-- **维护者**: hwc0212
+- **维护者**: huwencai.com
 - **联系方式**: 通过GitHub Issues联系
 
 ### 致谢
@@ -258,14 +385,13 @@ odoo_backup_YYYYMMDD_HHMMSS.zip
 
 - [Odoo社区](https://www.odoo.com/) 提供的优秀ERP系统
 - [PostgreSQL项目](https://www.postgresql.org/) 的强大数据库支持
-- [Docker团队](https://www.docker.com/) 提供的容器化解决方案
 - [Let's Encrypt](https://letsencrypt.org/) 提供的免费SSL证书服务
 - 所有提交Issue和PR的贡献者们
 
 ---
 
 <div align="center">
-  <sub>专为Odoo设计 | 支持 17.0+ | 一键完整迁移 | 更新于 2026-01-08</sub>
+  <sub>专为Ubuntu设计 | 支持 17.0+ | Redis加速 | 更新于 2026-01-10</sub>
   <br>
   <sub>由 <a href="https://github.com/morhon-tech">Morhon Technology</a> 开发维护</sub>
 </div>

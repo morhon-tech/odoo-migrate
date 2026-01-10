@@ -1,11 +1,11 @@
 #!/bin/bash
 # ====================================================
 # odoo-migrate.sh - Odoo迁移工具（优化版）
-# 功能：备份、恢复（源码/Docker）、Nginx配置
+# 功能：备份、恢复（源码）、Nginx配置
 # 使用：./odoo-migrate.sh [backup|restore|nginx|help]
 # 
 # 作者：Morhon Technology
-# 维护：hwc0212
+# 维护：huwencai.com
 # 项目：https://github.com/morhon-tech/odoo-migrate
 # 许可：MIT License
 # ====================================================
@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # 脚本信息
-SCRIPT_VERSION="2.1.0"
+SCRIPT_VERSION="2.2.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMP_BASE="/tmp/odoo_migrate_$$"
 
@@ -45,8 +45,7 @@ show_help() {
 
 使用方法:
   $0 backup              # 备份当前Odoo环境
-  $0 restore [source]    # 恢复到源码环境（默认）
-  $0 restore docker      # 恢复到Docker环境
+  $0 restore             # 恢复到源码环境
   $0 nginx               # 配置Nginx反向代理
   $0 status              # 查看当前状态
   $0 help                # 显示此帮助信息
@@ -54,14 +53,13 @@ show_help() {
 功能特性:
   ✓ 智能环境检测和版本记录
   ✓ 完整源码备份（包含修改）
-  ✓ 双恢复模式（源码/Docker）
+  ✓ 源码方式恢复部署
   ✓ 自动Nginx配置和SSL证书
   ✓ 性能和安全优化
 
 示例:
   ./odoo-migrate.sh backup           # 备份当前环境
   ./odoo-migrate.sh restore          # 源码方式恢复
-  ./odoo-migrate.sh restore docker   # Docker方式恢复
   ./odoo-migrate.sh nginx            # 配置域名访问
 
 EOF
@@ -71,11 +69,28 @@ EOF
 check_system() {
     log_info "检查系统环境..."
     
-    if ! command -v lsb_release &> /dev/null; then
-        log_error "不支持的操作系统，需要Ubuntu/Debian"
+    # 检查是否为Ubuntu系统
+    if ! command -v lsb_release &> /dev/null || ! lsb_release -i | grep -q "Ubuntu"; then
+        log_error "此脚本仅支持Ubuntu系统"
+        log_info "推荐使用Ubuntu 24.04 LTS"
         exit 1
     fi
     
+    # 检查Ubuntu版本
+    local ubuntu_version
+    ubuntu_version=$(lsb_release -r | cut -f2)
+    if [[ "$ubuntu_version" < "22.04" ]]; then
+        log_error "Ubuntu版本过低，需要22.04或更高版本"
+        log_info "推荐使用Ubuntu 24.04 LTS"
+        exit 1
+    fi
+    
+    log_success "检测到Ubuntu $ubuntu_version"
+    if [[ "$ubuntu_version" == "24.04" ]]; then
+        log_success "使用推荐的Ubuntu 24.04 LTS"
+    fi
+    
+    # 检查权限
     if [[ $EUID -eq 0 ]]; then
         log_warning "不建议以root用户运行此脚本"
         read -p "是否继续? [y/N]: " -n 1 -r
@@ -188,15 +203,50 @@ EOF
         fi
     done
     
-    # 备份Odoo源码
+    # 备份完整Odoo源码（强制备份整个目录）
     if [[ -n "$ODOO_DIR" && -d "$ODOO_DIR" ]]; then
-        log_info "备份Odoo源码..."
+        log_info "备份完整Odoo源码目录..."
+        
+        # 强制备份整个Odoo源码目录，包含所有可能的修改
+        local source_backup_dir="$backup_dir/source/odoo_complete"
+        mkdir -p "$source_backup_dir"
+        
+        log_info "  正在复制完整源码目录..."
         rsync -av --exclude='*.pyc' --exclude='__pycache__' --exclude='*.log' \
-              --exclude='.git' --exclude='filestore' --exclude='sessions' \
-              "$ODOO_DIR/" "$backup_dir/source/odoo_core/" 2>/dev/null || {
-            cp -r "$ODOO_DIR" "$backup_dir/source/odoo_core_backup" 2>/dev/null || true
-            find "$backup_dir/source/odoo_core_backup" -name "*.pyc" -delete 2>/dev/null || true
+              --exclude='filestore' --exclude='sessions' \
+              "$ODOO_DIR/" "$source_backup_dir/" 2>/dev/null || {
+            log_warning "  rsync失败，使用cp备份..."
+            cp -r "$ODOO_DIR/"* "$source_backup_dir/" 2>/dev/null || true
+            # 清理不需要的文件
+            find "$source_backup_dir" -name "*.pyc" -delete 2>/dev/null || true
+            find "$source_backup_dir" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
         }
+        
+        # 记录源码信息
+        local source_size=$(du -sh "$source_backup_dir" | cut -f1)
+        log_success "完整源码备份完成，大小: $source_size"
+        
+        # 记录Git信息（如果存在）
+        if [[ -d "$ODOO_DIR/.git" ]]; then
+            cd "$ODOO_DIR"
+            git log --oneline -10 > "$backup_dir/metadata/git_commits.txt" 2>/dev/null || true
+            git diff HEAD > "$backup_dir/metadata/git_modifications.txt" 2>/dev/null || true
+            git status --porcelain > "$backup_dir/metadata/git_status.txt" 2>/dev/null || true
+            cd - > /dev/null
+            log_info "  记录Git修改信息"
+        fi
+        
+        # 检查源码修改
+        local modified_files=$(find "$ODOO_DIR" -name "*.py" -newer "$ODOO_DIR/odoo-bin" 2>/dev/null | wc -l)
+        if [[ "$modified_files" -gt 0 ]]; then
+            log_warning "  检测到 $modified_files 个可能被修改的Python文件"
+            echo "MODIFIED_SOURCE_FILES: $modified_files" >> "$backup_dir/metadata/versions.txt"
+        fi
+        
+        echo "SOURCE_BACKUP_COMPLETE: true" >> "$backup_dir/metadata/versions.txt"
+    else
+        log_error "无法找到Odoo源码目录，备份失败"
+        exit 1
     fi
     
     # 备份自定义模块
@@ -215,6 +265,7 @@ EOF
     # 备份配置文件
     [[ -f "$ODOO_CONF" ]] && cp "$ODOO_CONF" "$backup_dir/config/"
     [[ -f "/etc/systemd/system/odoo.service" ]] && cp "/etc/systemd/system/odoo.service" "$backup_dir/config/" 2>/dev/null || true
+    [[ -f "/etc/redis/redis.conf" ]] && cp "/etc/redis/redis.conf" "$backup_dir/config/" 2>/dev/null || true
     
     # 创建恢复说明
     cat > "$backup_dir/RESTORE_INSTRUCTIONS.md" << EOF
@@ -228,14 +279,9 @@ EOF
 
 ## 恢复方式
 
-### 源码恢复（推荐）
+### 源码恢复
 \`\`\`bash
 ./odoo-migrate.sh restore
-\`\`\`
-
-### Docker恢复
-\`\`\`bash
-./odoo-migrate.sh restore docker
 \`\`\`
 
 ### 配置域名访问
@@ -274,11 +320,19 @@ install_system_dependencies() {
     sudo apt-get update -qq
     sudo apt-get install -y \
         postgresql postgresql-contrib libpq-dev \
+        redis-server redis-tools \
         build-essential libxml2-dev libxslt1-dev \
         libldap2-dev libsasl2-dev libssl-dev \
         zlib1g-dev libjpeg-dev libfreetype6-dev \
         node-less python3-pip python3-venv \
-        fonts-wqy-zenhei fontconfig curl wget git unzip
+        fonts-wqy-zenhei fontconfig curl wget git unzip \
+        nginx certbot python3-certbot-nginx
+    
+    # 启动并启用Redis
+    sudo systemctl start redis-server
+    sudo systemctl enable redis-server
+    
+    log_success "系统依赖安装完成"
 }
 
 # 安装wkhtmltopdf
@@ -295,7 +349,43 @@ install_wkhtmltopdf() {
     fi
 }
 
-# 优化PostgreSQL配置
+# 优化Redis配置
+optimize_redis() {
+    log_info "优化Redis配置..."
+    
+    local redis_conf="/etc/redis/redis.conf"
+    if [[ -f "$redis_conf" ]]; then
+        # 备份原配置
+        sudo cp "$redis_conf" "$redis_conf.backup.$(date +%Y%m%d)"
+        
+        # 获取系统内存
+        local total_mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        local total_mem_mb=$((total_mem_kb / 1024))
+        local redis_mem=$((total_mem_mb / 8))  # Redis使用1/8内存
+        
+        # 应用Redis优化配置
+        sudo bash -c "cat >> $redis_conf" << EOF
+
+# Odoo Redis Optimizations - Added $(date)
+maxmemory ${redis_mem}mb
+maxmemory-policy allkeys-lru
+save 900 1
+save 300 10
+save 60 10000
+stop-writes-on-bgsave-error yes
+rdbcompression yes
+rdbchecksum yes
+timeout 300
+tcp-keepalive 300
+databases 16
+EOF
+        
+        sudo systemctl restart redis-server
+        log_success "Redis优化完成，分配内存: ${redis_mem}MB"
+    else
+        log_warning "Redis配置文件不存在，跳过优化"
+    fi
+}
 optimize_postgresql() {
     log_info "优化PostgreSQL配置..."
     
@@ -388,17 +478,39 @@ restore_source() {
     sudo mkdir -p "$odoo_dir"
     sudo chown -R "$USER:$USER" "$odoo_dir"
     
-    # 恢复Odoo源码
-    if [[ -d "$backup_root/source/odoo_core" && -n "$(ls -A "$backup_root/source/odoo_core" 2>/dev/null)" ]]; then
-        log_info "恢复完整Odoo源码..."
+    # 恢复完整Odoo源码（强制使用备份的源码）
+    if [[ -d "$backup_root/source/odoo_complete" && -n "$(ls -A "$backup_root/source/odoo_complete" 2>/dev/null)" ]]; then
+        log_info "恢复完整Odoo源码（使用备份的源码）..."
+        
+        # 检查是否有源码备份标记
+        local source_complete=$(grep "SOURCE_BACKUP_COMPLETE:" "$backup_root/metadata/versions.txt" | cut -d' ' -f2 2>/dev/null || echo "false")
+        if [[ "$source_complete" = "true" ]]; then
+            log_success "检测到完整源码备份，开始恢复..."
+            cp -r "$backup_root/source/odoo_complete/"* "$odoo_dir/"
+            
+            # 检查是否有源码修改记录
+            local modified_count=$(grep "MODIFIED_SOURCE_FILES:" "$backup_root/metadata/versions.txt" | cut -d' ' -f2 2>/dev/null || echo "0")
+            if [[ "$modified_count" -gt 0 ]]; then
+                log_warning "恢复了包含 $modified_count 个修改文件的源码"
+            fi
+            
+            # 恢复Git信息（如果存在）
+            if [[ -f "$backup_root/metadata/git_commits.txt" ]]; then
+                log_info "检测到Git历史记录"
+                cp "$backup_root/metadata/git_"*.txt "$odoo_dir/" 2>/dev/null || true
+            fi
+        else
+            log_error "备份中的源码不完整，无法恢复"
+            exit 1
+        fi
+    elif [[ -d "$backup_root/source/odoo_core" && -n "$(ls -A "$backup_root/source/odoo_core" 2>/dev/null)" ]]; then
+        # 兼容旧版本备份格式
+        log_info "恢复Odoo源码（兼容模式）..."
         cp -r "$backup_root/source/odoo_core/"* "$odoo_dir/"
     else
-        log_info "下载Odoo $ODOO_VERSION 源码..."
-        cd /tmp
-        wget -q "https://github.com/odoo/odoo/archive/refs/tags/$ODOO_VERSION.zip" -O odoo_src.zip
-        unzip -q odoo_src.zip
-        cp -r "odoo-$ODOO_VERSION/"* "$odoo_dir/"
-        rm -rf odoo_src.zip "odoo-$ODOO_VERSION"
+        log_error "备份中未找到Odoo源码，无法恢复"
+        log_error "请确保备份文件完整且包含源码目录"
+        exit 1
     fi
     
     # 恢复自定义模块
@@ -425,6 +537,7 @@ restore_source() {
     sudo systemctl start postgresql
     sudo systemctl enable postgresql
     optimize_postgresql
+    optimize_redis
     
     # 创建数据库用户
     if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$USER'" | grep -q 1; then
@@ -468,6 +581,15 @@ db_name = $db_name
 http_port = $http_port
 without_demo = True
 proxy_mode = True
+
+# Redis会话存储配置
+session_store = redis
+redis_host = localhost
+redis_port = 6379
+redis_db = 1
+redis_pass = 
+
+# 性能优化配置
 workers = $(nproc)
 max_cron_threads = 2
 limit_memory_hard = 2684354560
@@ -475,8 +597,17 @@ limit_memory_soft = 2147483648
 limit_request = 8192
 limit_time_cpu = 600
 limit_time_real = 1200
+limit_time_real_cron = 0
 db_maxconn = 64
 list_db = False
+
+# 安全配置
+dbfilter = ^%d\$
+server_wide_modules = base,web
+
+# 日志配置
+log_level = info
+logrotate = True
 EOF
     
     # 创建systemd服务
@@ -528,235 +659,182 @@ EOF
         exit 1
     fi
 }
-# Docker恢复功能
-restore_docker() {
-    echo "========================================"
-    echo "    Odoo Docker Compose 恢复"
-    echo "========================================"
+# 配置本地Nginx（无SSL）
+configure_local_nginx() {
+    local odoo_port="$1"
     
-    check_system
+    log_info "配置本地Nginx反向代理..."
     
-    # 定位备份文件
-    local backup_file
-    backup_file=$(ls -1t "$SCRIPT_DIR"/odoo_backup_*.zip 2>/dev/null | head -1)
-    if [[ -z "$backup_file" ]]; then
-        log_error "当前目录未找到备份文件"
-        exit 1
-    fi
+    # 创建本地Nginx配置
+    local nginx_conf="/etc/nginx/sites-available/odoo_local"
     
-    # 解压并读取版本信息
-    local restore_dir="$TEMP_BASE/restore"
-    mkdir -p "$restore_dir"
-    unzip -q "$backup_file" -d "$restore_dir"
-    local backup_root
-    backup_root=$(find "$restore_dir" -type d -name "odoo_backup_*" | head -1)
-    
-    if [[ -f "$backup_root/metadata/versions.txt" ]]; then
-        ODOO_VERSION=$(grep "ODOO_VERSION:" "$backup_root/metadata/versions.txt" | cut -d' ' -f2)
-        if [[ "$ODOO_VERSION" = "未知" ]]; then
-            read -p "请输入Odoo版本号 (如 17.0): " ODOO_VERSION
-        fi
-    else
-        read -p "请输入Odoo版本号 (如 17.0): " ODOO_VERSION
-    fi
-    
-    # 验证版本格式
-    if [[ ! "$ODOO_VERSION" =~ ^[0-9]+\.0$ ]]; then
-        log_error "版本格式错误，应为 '17.0' 或 '18.0' 格式"
-        exit 1
-    fi
-    
-    # 安装Docker
-    if ! command -v docker &> /dev/null; then
-        log_info "安装Docker..."
-        sudo apt-get update -qq
-        sudo apt-get install -y docker.io docker-compose
-        sudo systemctl start docker
-        sudo systemctl enable docker
-        sudo usermod -aG docker "$USER"
-        log_warning "需要重新登录或执行: newgrp docker"
-    fi
-    
-    # 创建统一数据目录
-    local odoo_docker_dir="/opt/odoo_docker"
-    sudo mkdir -p "$odoo_docker_dir"/{postgres_data,odoo_data,addons,backups,config}
-    sudo chown -R "$USER:$USER" "$odoo_docker_dir"
-    # 恢复自定义模块和文件存储
-    for custom in "$backup_root/source"/custom_*; do
-        if [[ -d "$custom" ]]; then
-            cp -r "$custom" "$odoo_docker_dir/addons/"
-            log_success "恢复模块: $(basename "$custom")"
-        fi
-    done
-    
-    if [[ -d "$backup_root/filestore" ]]; then
-        cp -r "$backup_root/filestore" "$odoo_docker_dir/odoo_data/filestore" 2>/dev/null || true
-    fi
-    
-    cp "$backup_file" "$odoo_docker_dir/backups/"
-    
-    # 创建Docker Compose配置
-    cat > "$odoo_docker_dir/docker-compose.yml" << EOF
-version: '3.8'
+    sudo bash -c "cat > $nginx_conf" << EOF
+# Odoo本地反向代理配置 - 生成时间: $(date)
+# 部署模式: 本地模式（企业内网）
+# 访问方式: http://服务器IP:80
 
-services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: postgres
-      POSTGRES_USER: odoo
-      POSTGRES_PASSWORD: odoo
-      PGDATA: /var/lib/postgresql/data/pgdata
-    volumes:
-      - ./postgres_data:/var/lib/postgresql/data/pgdata
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U odoo"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+# 上游服务器配置
+upstream odoo_backend {
+    server 127.0.0.1:$odoo_port max_fails=3 fail_timeout=30s;
+    keepalive 32;
+    keepalive_requests 100;
+    keepalive_timeout 60s;
+}
 
-  odoo:
-    image: odoo:$ODOO_VERSION
-    depends_on:
-      postgres:
-        condition: service_healthy
-    ports:
-      - "127.0.0.1:8069:8069"
-    environment:
-      HOST: postgres
-      USER: odoo
-      PASSWORD: odoo
-    volumes:
-      - ./odoo_data:/var/lib/odoo
-      - ./addons:/mnt/extra-addons
-      - ./config/odoo.conf:/etc/odoo/odoo.conf:ro
-    restart: unless-stopped
-    command: --config=/etc/odoo/odoo.conf --proxy-mode --db-filter=^%d$
+# 限流配置
+limit_req_zone \\\$binary_remote_addr zone=login:10m rate=10r/m;
+limit_req_zone \\\$binary_remote_addr zone=api:10m rate=50r/m;
+limit_req_zone \\\$binary_remote_addr zone=general:10m rate=20r/s;
 
-volumes:
-  postgres_data:
-  odoo_data:
-EOF
-    # 创建Odoo配置文件
-    mkdir -p "$odoo_docker_dir/config"
-    cat > "$odoo_docker_dir/config/odoo.conf" << EOF
-[options]
-db_host = postgres
-db_port = 5432
-db_user = odoo
-db_password = odoo
-db_maxconn = 64
-http_port = 8069
-proxy_mode = True
-workers = $(nproc)
-max_cron_threads = 2
-limit_memory_hard = 2684354560
-limit_memory_soft = 2147483648
-admin_passwd = $(openssl rand -base64 32)
-list_db = False
-dbfilter = ^%d\$
-addons_path = /usr/lib/python3/dist-packages/odoo/addons,/mnt/extra-addons
-EOF
+# 缓存配置
+proxy_cache_path /var/cache/nginx/odoo levels=1:2 keys_zone=odoo_cache:100m max_size=1g inactive=60m;
+proxy_cache_path /var/cache/nginx/odoo_static levels=1:2 keys_zone=odoo_static:50m max_size=500m inactive=7d;
+
+# 主服务器配置
+server {
+    listen 80 default_server;
+    server_name _;
     
-    # 创建管理脚本
-    cat > "$odoo_docker_dir/manage.sh" << 'EOF'
-#!/bin/bash
-case "$1" in
-    start) docker-compose up -d ;;
-    stop) docker-compose down ;;
-    restart) docker-compose restart ;;
-    logs) docker-compose logs -f odoo ;;
-    status) docker-compose ps ;;
-    backup)
-        DB_NAME=$(docker-compose exec -T postgres psql -U odoo -t -c "SELECT datname FROM pg_database WHERE datname LIKE 'odoo_%'" | head -1 | tr -d '[:space:]')
-        if [[ -n "$DB_NAME" ]]; then
-            BACKUP_FILE="backups/backup_$(date +%Y%m%d_%H%M%S).sql"
-            mkdir -p backups
-            docker-compose exec -T postgres pg_dump -U odoo "$DB_NAME" > "$BACKUP_FILE"
-            gzip "$BACKUP_FILE"
-            echo "备份完成: ${BACKUP_FILE}.gz"
-        else
-            echo "未找到Odoo数据库"
-        fi
-        ;;
-    restore) ./restore_database.sh ;;
-    *) echo "用法: $0 {start|stop|restart|logs|status|backup|restore}" ;;
-esac
-EOF
-    chmod +x "$odoo_docker_dir/manage.sh"
-    # 创建数据库恢复脚本
-    cat > "$odoo_docker_dir/restore_database.sh" << 'EOF'
-#!/bin/bash
-set -e
-echo "=== 数据库恢复工具 ==="
-
-POSTGRES_CONTAINER=$(docker-compose ps -q postgres)
-if [[ -z "$POSTGRES_CONTAINER" ]]; then
-    echo "[错误] PostgreSQL容器未运行"
-    exit 1
-fi
-
-BACKUP_FILE=$(ls -1t backups/odoo_backup_*.zip | head -1)
-if [[ -z "$BACKUP_FILE" ]]; then
-    echo "[错误] 未找到备份文件"
-    exit 1
-fi
-
-TEMP_DIR="/tmp/db_restore_$(date +%s)"
-mkdir -p "$TEMP_DIR"
-unzip -q "$BACKUP_FILE" -d "$TEMP_DIR"
-BACKUP_ROOT=$(find "$TEMP_DIR" -type d -name "odoo_backup_*" | head -1)
-
-if [[ ! -f "$BACKUP_ROOT/database/dump.sql" ]]; then
-    echo "[错误] 备份中未找到数据库文件"
-    exit 1
-fi
-
-DB_NAME="odoo_restored_$(date +%Y%m%d)"
-echo "创建数据库: $DB_NAME"
-docker exec "$POSTGRES_CONTAINER" bash -c "createdb -U odoo $DB_NAME 2>/dev/null || true"
-
-echo "恢复数据库..."
-docker exec -i "$POSTGRES_CONTAINER" psql -U odoo "$DB_NAME" < "$BACKUP_ROOT/database/dump.sql"
-
-rm -rf "$TEMP_DIR"
-echo "✅ 数据库恢复完成！数据库名: $DB_NAME"
-EOF
-    chmod +x "$odoo_docker_dir/restore_database.sh"
+    # 基本设置
+    client_max_body_size 200M;
+    client_body_timeout 60s;
+    keepalive_timeout 65s;
     
-    # 启动服务
-    cd "$odoo_docker_dir"
-    docker-compose down 2>/dev/null || true
-    docker-compose up -d
+    # 安全头部（本地环境适用）
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    server_tokens off;
     
-    # 等待并恢复数据库
-    sleep 15
-    if [[ -f "$backup_root/database/dump.sql" ]]; then
-        ./restore_database.sh
-    fi
+    # 禁止访问敏感文件
+    location ~ /\\.(ht|git|svn) {
+        deny all;
+        return 404;
+    }
     
-    # 验证
-    if curl -s --max-time 5 http://localhost:8069 > /dev/null; then
-        echo "========================================"
-        log_success "Odoo Docker Compose 恢复成功！"
-        echo "========================================"
-        log_info "访问地址: http://$(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo "localhost"):8069"
-        log_info "数据目录: $odoo_docker_dir"
-        echo ""
-        log_info "管理命令 (在 $odoo_docker_dir 目录):"
-        echo "  ./manage.sh start|stop|restart|logs|status"
-        echo ""
-        log_info "接下来运行: ./odoo-migrate.sh nginx"
-        echo "========================================"
+    location ~ \\.(sql|conf|log|bak|backup)\$ {
+        deny all;
+        return 404;
+    }
+    
+    # 登录限流（本地环境相对宽松）
+    location ~* ^/web/login {
+        limit_req zone=login burst=5 nodelay;
+        proxy_pass http://odoo_backend;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+    
+    # API限流
+    location ~* ^/(api|jsonrpc) {
+        limit_req zone=api burst=20 nodelay;
+        proxy_pass http://odoo_backend;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+    
+    # 静态文件高性能缓存
+    location ~* /web/(static|image)/ {
+        proxy_pass http://odoo_backend;
+        proxy_cache odoo_static;
+        proxy_cache_key \$scheme\$proxy_host\$request_uri;
+        proxy_cache_valid 200 7d;
+        proxy_cache_valid 404 1m;
+        expires 7d;
+        add_header Cache-Control "public, immutable";
+        add_header X-Cache-Status \$upstream_cache_status always;
+        gzip on;
+        gzip_vary on;
+        gzip_types text/css application/javascript image/svg+xml;
+    }
+    
+    # CSS/JS文件优化
+    location ~* \\.(css|js)\$ {
+        proxy_pass http://odoo_backend;
+        proxy_cache odoo_static;
+        proxy_cache_valid 200 1d;
+        expires 1d;
+        add_header Cache-Control "public";
+        gzip on;
+        gzip_types text/css application/javascript;
+    }
+    
+    # 健康检查端点
+    location /nginx-health {
+        access_log off;
+        return 200 "healthy\\n";
+        add_header Content-Type text/plain;
+    }
+    
+    # 主应用代理
+    location / {
+        limit_req zone=general burst=30 nodelay;
         
-        # 记录部署信息
-        echo "DOCKER" > "$SCRIPT_DIR/DEPLOYMENT_TYPE.txt"
-        echo "8069" > "$SCRIPT_DIR/ODOO_PORT.txt"
+        proxy_pass http://odoo_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        
+        # 代理头部
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        
+        # 超时设置
+        proxy_connect_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+        
+        # 缓冲设置
+        proxy_buffering on;
+        proxy_buffers 16 64k;
+        proxy_buffer_size 128k;
+    }
+}
+EOF
+    
+    # 启用配置
+    sudo ln -sf "$nginx_conf" /etc/nginx/sites-enabled/
+    sudo rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    
+    # 创建缓存目录
+    sudo mkdir -p /var/cache/nginx/odoo /var/cache/nginx/odoo_static
+    sudo chown -R www-data:www-data /var/cache/nginx/
+    
+    # 测试并重启Nginx
+    if sudo nginx -t; then
+        sudo systemctl enable nginx
+        sudo systemctl restart nginx
+        log_success "本地Nginx配置完成"
+        
+        # 获取服务器IP
+        local server_ip
+        server_ip=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || ip route get 1 | awk '{print $7; exit}' || echo "localhost")
+        
+        echo "========================================"
+        log_success "本地模式Nginx配置完成！"
+        echo "========================================"
+        log_info "部署模式: 本地模式（企业内网）"
+        log_info "访问地址: http://$server_ip"
+        if [[ "$server_ip" != "localhost" ]]; then
+            log_info "内网访问: http://$server_ip"
+        fi
+        log_info "端口: 80 (HTTP)"
+        echo ""
+        log_info "适用场景: 企业内网环境，员工内部使用"
+        log_info "优势: 访问速度快，安全性高，维护简单"
+        echo "========================================"
     else
-        log_warning "服务可能正在启动中，请检查: cd $odoo_docker_dir && docker-compose logs -f"
+        log_error "Nginx配置测试失败"
+        exit 1
     fi
 }
+
 # Nginx配置功能
 configure_nginx() {
     echo "========================================"
@@ -783,53 +861,166 @@ configure_nginx() {
         [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
     fi
     
-    # 获取域名信息
-    read -p "请输入您的域名 (例如: example.com): " domain
+    # 获取域名信息（智能域名处理）
+    echo ""
+    log_info "Nginx部署模式选择："
+    echo "  根据Odoo用途选择合适的部署模式："
+    echo ""
+    echo "  📊 企业管理系统用途："
+    echo "    1. 本地模式（推荐）- 直接回车，使用IP访问"
+    echo "    2. 二级域名模式（推荐）- 如 erp.company.com, manage.company.com"
+    echo ""
+    echo "  🌐 网站建设用途："
+    echo "    3. 主域名模式（推荐）- 如 company.com, www.company.com"
+    echo ""
     
-    # 处理域名
-    if [[ $domain == www.* ]]; then
-        local main_domain="${domain#www.}"
-        local www_domain="$domain"
+    read -p "请输入域名（直接回车使用本地IP模式）: " domain
+    
+    # 智能域名处理逻辑
+    local deployment_mode=""
+    local main_domain=""
+    local www_domain=""
+    local use_ssl=false
+    local admin_email=""
+    local is_website_mode=false
+    
+    if [[ -z "$domain" ]]; then
+        # 本地模式（企业管理推荐）
+        deployment_mode="local"
+        log_success "选择本地模式 - 企业管理系统"
+        log_info "访问方式: http://服务器IP"
+        log_info "适用场景: 企业内网环境，管理系统使用"
+        log_info "优势: 访问速度快，安全性高，维护简单"
+        
+        # 本地模式不需要SSL和域名配置
+        configure_local_nginx "$odoo_port"
+        return 0
+        
+    elif [[ "$domain" =~ ^[a-zA-Z0-9-]+\.[a-zA-Z0-9-]+\.[a-zA-Z]{2,}$ ]]; then
+        # 二级域名模式（企业管理推荐）
+        deployment_mode="subdomain"
+        main_domain="$domain"
+        log_success "选择二级域名模式 - 企业管理系统"
+        log_info "访问方式: https://$domain"
+        log_info "适用场景: 企业管理系统，远程办公"
+        log_info "优势: 专业性强，便于管理，安全可控"
+        
+        # 推荐的二级域名示例提示
+        case "$domain" in
+            erp.*) log_info "✅ 优秀选择: ERP企业资源规划系统" ;;
+            manage.*) log_info "✅ 优秀选择: 企业管理系统" ;;
+            admin.*) log_info "✅ 优秀选择: 管理后台系统" ;;
+            office.*) log_info "✅ 优秀选择: 办公系统" ;;
+            *) log_info "✅ 二级域名适合企业管理系统" ;;
+        esac
+        
     else
-        local main_domain="$domain"
-        local www_domain="www.$domain"
+        # 主域名模式（网站建设推荐）
+        deployment_mode="maindomain"
+        is_website_mode=true
+        log_success "✅ 选择主域名模式 - 网站建设"
+        log_info "访问方式: https://$domain"
+        log_info "适用场景: 企业官网，电商网站，门户网站"
+        log_info "优势: SEO友好，品牌展示，用户体验佳"
+        
+        # 处理主域名
+        if [[ $domain == www.* ]]; then
+            main_domain="${domain#www.}"
+            www_domain="$domain"
+        else
+            main_domain="$domain"
+            www_domain="www.$domain"
+        fi
+        
+        log_info "主域名: $main_domain"
+        log_info "WWW域名: $www_domain"
     fi
     
     # 安装Nginx和Certbot
     sudo apt-get update -qq
     sudo apt-get install -y nginx certbot python3-certbot-nginx
     
-    # 获取SSL证书
-    read -p "请输入管理员邮箱: " admin_email
-    
-    log_info "申请SSL证书..."
-    local use_ssl=true
-    if sudo certbot certonly --nginx --non-interactive --agree-tos \
-        -m "$admin_email" -d "$main_domain" -d "$www_domain" 2>/dev/null; then
-        log_success "SSL证书获取完成"
-    else
-        log_warning "SSL证书获取失败，配置HTTP访问"
-        use_ssl=false
+    # SSL证书申请（仅二级域名和主域名模式）
+    if [[ "$deployment_mode" != "local" ]]; then
+        read -p "请输入管理员邮箱: " admin_email
+        
+        log_info "申请SSL证书..."
+        use_ssl=true
+        
+        if [[ "$deployment_mode" = "subdomain" ]]; then
+            # 二级域名只申请单个证书
+            if sudo certbot certonly --nginx --non-interactive --agree-tos \
+                -m "$admin_email" -d "$main_domain" 2>/dev/null; then
+                log_success "SSL证书获取完成"
+            else
+                log_warning "SSL证书获取失败，配置HTTP访问"
+                use_ssl=false
+            fi
+        else
+            # 主域名申请主域名和www域名证书
+            if sudo certbot certonly --nginx --non-interactive --agree-tos \
+                -m "$admin_email" -d "$main_domain" -d "$www_domain" 2>/dev/null; then
+                log_success "SSL证书获取完成"
+            else
+                log_warning "SSL证书获取失败，配置HTTP访问"
+                use_ssl=false
+            fi
+        fi
     fi
     # 创建Nginx配置
-    local nginx_conf="/etc/nginx/sites-available/odoo_$main_domain"
+    local nginx_conf="/etc/nginx/sites-available/odoo_${main_domain//\./_}"
     
-    sudo bash -c "cat > $nginx_conf" << EOF
-# Odoo反向代理配置 - 生成时间: $(date)
+    if [[ "$is_website_mode" = true ]]; then
+        # 网站模式配置 - 针对网站建设优化
+        sudo bash -c "cat > $nginx_conf" << EOF
+# Odoo网站反向代理配置 - 生成时间: $(date)
+# 部署模式: 网站建设模式
+# 优化重点: SEO、性能、用户体验
+
+upstream odoo_backend {
+    server 127.0.0.1:$odoo_port max_fails=3 fail_timeout=30s;
+    keepalive 64;
+    keepalive_requests 1000;
+    keepalive_timeout 75s;
+}
+
+# 网站专用限流配置（相对宽松）
+limit_req_zone \\\$binary_remote_addr zone=login:10m rate=10r/m;
+limit_req_zone \\\$binary_remote_addr zone=api:10m rate=100r/m;
+limit_req_zone \\\$binary_remote_addr zone=general:10m rate=50r/s;
+limit_req_zone \\\$binary_remote_addr zone=website:10m rate=100r/s;
+
+# 网站专用缓存配置
+proxy_cache_path /var/cache/nginx/odoo_website levels=1:2 keys_zone=website_cache:200m max_size=2g inactive=24h;
+proxy_cache_path /var/cache/nginx/odoo_static levels=1:2 keys_zone=static_cache:100m max_size=1g inactive=7d;
+proxy_cache_path /var/cache/nginx/odoo_images levels=1:2 keys_zone=image_cache:100m max_size=1g inactive=30d;
+
+EOF
+    else
+        # 管理系统模式配置
+        sudo bash -c "cat > $nginx_conf" << EOF
+# Odoo管理系统反向代理配置 - 生成时间: $(date)
+# 部署模式: 企业管理系统
+# 优化重点: 安全性、稳定性、管理效率
 
 upstream odoo_backend {
     server 127.0.0.1:$odoo_port max_fails=3 fail_timeout=30s;
     keepalive 32;
+    keepalive_requests 100;
+    keepalive_timeout 60s;
 }
 
-# 限流配置
+# 管理系统限流配置（相对严格）
 limit_req_zone \\\$binary_remote_addr zone=login:10m rate=5r/m;
 limit_req_zone \\\$binary_remote_addr zone=api:10m rate=30r/m;
 limit_req_zone \\\$binary_remote_addr zone=general:10m rate=10r/s;
 
-# 缓存配置
+# 管理系统缓存配置
 proxy_cache_path /var/cache/nginx/odoo levels=1:2 keys_zone=odoo_cache:100m max_size=1g inactive=60m;
+proxy_cache_path /var/cache/nginx/odoo_static levels=1:2 keys_zone=static_cache:50m max_size=500m inactive=7d;
+
 EOF
+    fi
     
     # HTTP重定向配置（如果启用SSL）
     if [[ "$use_ssl" = true ]]; then
@@ -872,14 +1063,186 @@ server {
     server_name $main_domain;
 EOF
     fi
-    # 通用配置
-    sudo bash -c "cat >> $nginx_conf" << 'EOF'
+    
+    # 根据模式添加不同的配置
+    if [[ "$is_website_mode" = true ]]; then
+        # 网站模式专用配置
+        sudo bash -c "cat >> $nginx_conf" << 'EOF'
+    
+    client_max_body_size 500M;
+    client_body_timeout 120s;
+    keepalive_timeout 75s;
+    
+    # 网站SEO优化头部
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    server_tokens off;
+    
+    # 网站专用Gzip配置
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_comp_level 6;
+    gzip_types
+        text/plain
+        text/css
+        text/xml
+        text/javascript
+        application/javascript
+        application/xml+rss
+        application/json
+        image/svg+xml;
+    
+    # 禁止访问敏感文件
+    location ~ /\.(ht|git|svn) {
+        deny all;
+        return 404;
+    }
+    
+    location ~ \.(sql|conf|log|bak|backup)$ {
+        deny all;
+        return 404;
+    }
+    
+    # 网站首页和页面缓存（SEO优化）
+    location = / {
+        limit_req zone=website burst=50 nodelay;
+        proxy_pass http://odoo_backend;
+        proxy_cache website_cache;
+        proxy_cache_key $scheme$proxy_host$request_uri$is_args$args;
+        proxy_cache_valid 200 10m;
+        proxy_cache_valid 404 1m;
+        add_header X-Cache-Status $upstream_cache_status always;
+        
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # 网站页面缓存
+    location ~* ^/(page|shop|blog|event|forum)/ {
+        limit_req zone=website burst=100 nodelay;
+        proxy_pass http://odoo_backend;
+        proxy_cache website_cache;
+        proxy_cache_key $scheme$proxy_host$request_uri$is_args$args;
+        proxy_cache_valid 200 5m;
+        proxy_cache_valid 404 1m;
+        add_header X-Cache-Status $upstream_cache_status always;
+        
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # 图片优化缓存（网站重要）
+    location ~* \.(jpg|jpeg|png|gif|ico|svg|webp)$ {
+        proxy_pass http://odoo_backend;
+        proxy_cache image_cache;
+        proxy_cache_key $scheme$proxy_host$request_uri;
+        proxy_cache_valid 200 30d;
+        proxy_cache_valid 404 1h;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+        add_header X-Cache-Status $upstream_cache_status always;
+        
+        # 图片压缩
+        gzip on;
+        gzip_types image/svg+xml;
+    }
+    
+    # 登录限流（网站用户较多）
+    location ~* ^/web/login {
+        limit_req zone=login burst=10 nodelay;
+        proxy_pass http://odoo_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # API限流（网站API调用较多）
+    location ~* ^/(api|jsonrpc) {
+        limit_req zone=api burst=50 nodelay;
+        proxy_pass http://odoo_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # 静态文件高性能缓存
+    location ~* /web/(static|image)/ {
+        proxy_pass http://odoo_backend;
+        proxy_cache static_cache;
+        proxy_cache_key $scheme$proxy_host$request_uri;
+        proxy_cache_valid 200 7d;
+        proxy_cache_valid 404 1m;
+        expires 7d;
+        add_header Cache-Control "public, immutable";
+        add_header X-Cache-Status $upstream_cache_status always;
+        gzip on;
+        gzip_vary on;
+        gzip_types text/css application/javascript image/svg+xml;
+    }
+    
+    # CSS/JS文件优化
+    location ~* \.(css|js)$ {
+        proxy_pass http://odoo_backend;
+        proxy_cache static_cache;
+        proxy_cache_valid 200 1d;
+        expires 1d;
+        add_header Cache-Control "public";
+        gzip on;
+        gzip_types text/css application/javascript;
+    }
+    
+    # 网站健康检查
+    location /nginx-health {
+        access_log off;
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
+    }
+    
+    # 主应用代理（网站模式）
+    location / {
+        limit_req zone=website burst=100 nodelay;
+        
+        proxy_pass http://odoo_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        
+        # 代理头部
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        
+        # 网站优化超时设置
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 120s;
+        proxy_read_timeout 120s;
+        
+        # 缓冲设置
+        proxy_buffering on;
+        proxy_buffers 32 64k;
+        proxy_buffer_size 128k;
+    }
+}
+EOF
+    else
+        # 管理系统模式配置
+        sudo bash -c "cat >> $nginx_conf" << 'EOF'
     
     client_max_body_size 200M;
     client_body_timeout 60s;
     keepalive_timeout 65s;
     
-    # 安全头部
+    # 管理系统安全头部
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
@@ -896,7 +1259,7 @@ EOF
         return 404;
     }
     
-    # 登录限流
+    # 登录限流（管理系统较严格）
     location ~* ^/web/login {
         limit_req zone=login burst=3 nodelay;
         proxy_pass http://odoo_backend;
@@ -919,7 +1282,7 @@ EOF
     # 静态文件缓存
     location ~* /web/(static|image)/ {
         proxy_pass http://odoo_backend;
-        proxy_cache odoo_cache;
+        proxy_cache static_cache;
         proxy_cache_valid 200 7d;
         expires 7d;
         add_header Cache-Control "public, immutable";
@@ -927,7 +1290,7 @@ EOF
         gzip_types text/css application/javascript image/svg+xml;
     }
     
-    # 主应用代理
+    # 主应用代理（管理系统）
     location / {
         limit_req zone=general burst=20 nodelay;
         proxy_pass http://odoo_backend;
@@ -941,6 +1304,7 @@ EOF
     }
 }
 EOF
+    fi
     # WWW重定向配置
     if [[ "$use_ssl" = true ]]; then
         sudo bash -c "cat >> $nginx_conf" << EOF
@@ -963,7 +1327,11 @@ EOF
     sudo rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
     
     # 创建缓存目录
-    sudo mkdir -p /var/cache/nginx/odoo
+    if [[ "$is_website_mode" = true ]]; then
+        sudo mkdir -p /var/cache/nginx/odoo_website /var/cache/nginx/odoo_static /var/cache/nginx/odoo_images
+    else
+        sudo mkdir -p /var/cache/nginx/odoo /var/cache/nginx/odoo_static
+    fi
     sudo chown -R www-data:www-data /var/cache/nginx/
     
     # 测试并重启Nginx
@@ -985,11 +1353,19 @@ HOOK
         log_success "Nginx配置完成！"
         echo "========================================"
         log_info "域名: $main_domain"
+        if [[ "$is_website_mode" = true ]]; then
+            log_info "部署模式: 网站建设模式"
+            log_info "优化重点: SEO、性能、用户体验"
+        else
+            log_info "部署模式: 企业管理系统"
+            log_info "优化重点: 安全性、稳定性、管理效率"
+        fi
         log_info "SSL证书: $([ "$use_ssl" = true ] && echo "已启用" || echo "未启用")"
         echo ""
         log_info "访问地址:"
         if [[ "$use_ssl" = true ]]; then
             echo "  https://$main_domain"
+            [[ -n "$www_domain" && "$is_website_mode" = true ]] && echo "  https://$www_domain (自动跳转)"
         else
             echo "  http://$main_domain"
         fi
@@ -1005,46 +1381,28 @@ check_status() {
     echo "    Odoo 系统状态检查"
     echo "========================================"
     
-    # 检查部署类型
-    local deployment_type="未知"
+    # 检查配置端口
     local odoo_port="8069"
-    
-    [[ -f "$SCRIPT_DIR/DEPLOYMENT_TYPE.txt" ]] && deployment_type=$(cat "$SCRIPT_DIR/DEPLOYMENT_TYPE.txt")
     [[ -f "$SCRIPT_DIR/ODOO_PORT.txt" ]] && odoo_port=$(cat "$SCRIPT_DIR/ODOO_PORT.txt")
     
-    log_info "部署类型: $deployment_type"
+    log_info "部署类型: 源码部署"
     log_info "配置端口: $odoo_port"
     
     # 检查服务状态
     echo ""
     log_info "服务状态检查:"
     
-    if [[ "$deployment_type" = "DOCKER" ]]; then
-        # Docker部署检查
-        if [[ -d "/opt/odoo_docker" ]]; then
-            cd /opt/odoo_docker
-            if command -v docker-compose &> /dev/null; then
-                echo "  Docker Compose状态:"
-                docker-compose ps 2>/dev/null || echo "    未运行或配置错误"
-            else
-                log_warning "  Docker Compose未安装"
-            fi
-        else
-            log_warning "  Docker数据目录不存在"
-        fi
+    # 源码部署检查
+    if systemctl is-active --quiet odoo 2>/dev/null; then
+        log_success "  Odoo服务: 运行中"
     else
-        # 源码部署检查
-        if systemctl is-active --quiet odoo 2>/dev/null; then
-            log_success "  Odoo服务: 运行中"
-        else
-            log_warning "  Odoo服务: 未运行"
-        fi
-        
-        if systemctl is-active --quiet postgresql 2>/dev/null; then
-            log_success "  PostgreSQL: 运行中"
-        else
-            log_warning "  PostgreSQL: 未运行"
-        fi
+        log_warning "  Odoo服务: 未运行"
+    fi
+    
+    if systemctl is-active --quiet postgresql 2>/dev/null; then
+        log_success "  PostgreSQL: 运行中"
+    else
+        log_warning "  PostgreSQL: 未运行"
     fi
     
     # 检查端口监听
@@ -1115,11 +1473,7 @@ main() {
             backup_odoo
             ;;
         restore)
-            if [[ "${2:-source}" = "docker" ]]; then
-                restore_docker
-            else
-                restore_source
-            fi
+            restore_source
             ;;
         nginx)
             configure_nginx
