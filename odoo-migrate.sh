@@ -79,10 +79,11 @@ check_system() {
     # 检查Ubuntu版本
     local ubuntu_version
     ubuntu_version=$(lsb_release -r | cut -f2)
-    if [[ "$ubuntu_version" < "22.04" ]]; then
-        log_error "Ubuntu版本过低，需要22.04或更高版本"
-        log_info "推荐使用Ubuntu 24.04 LTS"
+    if [[ "$ubuntu_version" < "20.04" ]]; then
+        log_error "Ubuntu版本过低，需要20.04或更高版本"
         exit 1
+    elif [[ "$ubuntu_version" < "22.04" ]]; then
+        log_warning "Ubuntu $ubuntu_version 可用于备份，恢复建议使用22.04+"
     fi
     
     log_success "检测到Ubuntu $ubuntu_version"
@@ -126,15 +127,28 @@ detect_odoo_environment() {
     
     # 获取Odoo版本和路径
     ODOO_BIN_PATH=$(ps -p "$ODOO_PID" -o cmd= | awk '{print $2}')
+    ODOO_PYTHON=$(ps -p "$ODOO_PID" -o cmd= | awk '{print $1}')
     if [[ -f "$ODOO_BIN_PATH" ]]; then
-        ODOO_VERSION=$("$ODOO_BIN_PATH" --version 2>/dev/null | head -1 | grep -o '[0-9]\+\.[0-9]\+' || echo "未知")
         ODOO_DIR=$(dirname "$ODOO_BIN_PATH")
+        # Read version from release.py (more reliable than --version)
+        local release_py="$ODOO_DIR/odoo/release.py"
+        if [[ -f "$release_py" ]]; then
+            ODOO_VERSION=$(grep "^version_info" "$release_py" | grep -o '([0-9, ]*' | grep -o '[0-9]\+' | head -2 | paste -sd'.')
+        else
+            ODOO_VERSION=$("$ODOO_BIN_PATH" --version 2>/dev/null | head -1 | grep -o '[0-9]\+\.[0-9]\+' || echo "未知")
+        fi
     else
         ODOO_VERSION="未知"
         ODOO_DIR=""
     fi
     
-    PYTHON_VERSION=$(python3 --version 2>/dev/null | cut -d' ' -f2 || echo "未知")
+    # Detect venv path from the python binary running Odoo
+    ODOO_VENV=""
+    if [[ -n "$ODOO_PYTHON" && "$ODOO_PYTHON" == */venv/bin/* || "$ODOO_PYTHON" == *_venv/bin/* ]]; then
+        ODOO_VENV=$(dirname "$(dirname "$ODOO_PYTHON")")
+    fi
+    
+    PYTHON_VERSION=$("${ODOO_PYTHON:-python3}" --version 2>/dev/null | cut -d' ' -f2 || echo "未知")
     
     log_success "环境检测完成"
     log_info "  数据库: ${DB_NAME:-未设置}"
@@ -168,6 +182,7 @@ ODOO_VERSION: $ODOO_VERSION
 PYTHON_VERSION: $PYTHON_VERSION
 POSTGRESQL_VERSION: $(psql --version 2>/dev/null | cut -d' ' -f3 || echo "未知")
 ODOO_BIN_PATH: $ODOO_BIN_PATH
+ODOO_VENV: $ODOO_VENV
 BACKUP_DATE: $backup_date
 ORIGINAL_HOST: $(hostname)
 EOF
@@ -212,7 +227,7 @@ EOF
         mkdir -p "$source_backup_dir"
         
         log_info "  正在复制完整源码目录..."
-        rsync -av --exclude='*.pyc' --exclude='__pycache__' --exclude='*.log' \
+        rsync -av --exclude='.git' --exclude='*.pyc' --exclude='__pycache__' --exclude='*.log' --exclude='*.pot' --exclude='node_modules' \
               --exclude='filestore' --exclude='sessions' \
               "$ODOO_DIR/" "$source_backup_dir/" 2>/dev/null || {
             log_warning "  rsync失败，使用cp备份..."
@@ -260,6 +275,15 @@ EOF
                 log_success "备份自定义模块: $dir_name"
             fi
         done
+    fi
+    
+    # 导出pip依赖列表（精确版本）
+    if [[ -n "$ODOO_VENV" && -f "$ODOO_VENV/bin/pip" ]]; then
+        "$ODOO_VENV/bin/pip" freeze > "$backup_dir/source/odoo_complete/pip_freeze.txt" 2>/dev/null || true
+        log_success "导出pip依赖列表（从venv）"
+    elif command -v pip3 &>/dev/null; then
+        pip3 freeze > "$backup_dir/source/odoo_complete/pip_freeze.txt" 2>/dev/null || true
+        log_success "导出pip依赖列表（系统pip）"
     fi
     
     # 备份配置文件
@@ -525,12 +549,25 @@ restore_source() {
     
     # 创建Python虚拟环境
     log_info "创建Python虚拟环境..."
-    local venv_path="$odoo_dir/venv"
+    local venv_path="$odoo_dir/odoo_venv"
     python3 -m venv "$venv_path"
     source "$venv_path/bin/activate"
     
     pip install --upgrade pip setuptools wheel
-    pip install psycopg2-binary Babel Pillow lxml reportlab python-dateutil
+    # Install from pip_freeze.txt (exact versions from source server) if available
+    if [[ -f "$odoo_dir/pip_freeze.txt" ]]; then
+        log_info "从 pip_freeze.txt 安装精确依赖版本..."
+        pip install -r "$odoo_dir/pip_freeze.txt" 2>/dev/null || {
+            log_warning "部分依赖安装失败，尝试 requirements.txt..."
+            [[ -f "$odoo_dir/requirements.txt" ]] && pip install -r "$odoo_dir/requirements.txt"
+        }
+    elif [[ -f "$odoo_dir/requirements.txt" ]]; then
+        log_info "从 requirements.txt 安装依赖..."
+        pip install -r "$odoo_dir/requirements.txt"
+    else
+        log_warning "未找到依赖文件，安装基础依赖..."
+        pip install psycopg2-binary Babel Pillow lxml reportlab python-dateutil
+    fi
     deactivate
     
     # 启动PostgreSQL并优化
@@ -579,15 +616,10 @@ db_port = 5432
 db_user = $USER
 db_name = $db_name
 http_port = $http_port
+gevent_port = 8072
 without_demo = True
 proxy_mode = True
 
-# Redis会话存储配置
-session_store = redis
-redis_host = localhost
-redis_port = 6379
-redis_db = 1
-redis_pass = 
 
 # 性能优化配置
 workers = $(nproc)
@@ -597,17 +629,15 @@ limit_memory_soft = 2147483648
 limit_request = 8192
 limit_time_cpu = 600
 limit_time_real = 1200
-limit_time_real_cron = 0
+limit_time_real_cron = 3600
 db_maxconn = 64
 list_db = False
 
 # 安全配置
-dbfilter = ^%d\$
 server_wide_modules = base,web
 
 # 日志配置
 log_level = info
-logrotate = True
 EOF
     
     # 创建systemd服务
@@ -622,7 +652,7 @@ Type=simple
 User=$USER
 Group=$USER
 WorkingDirectory=$odoo_dir
-Environment="PATH=$venv_path/bin"
+Environment="PATH=$venv_path/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 ExecStart=$venv_path/bin/python3 $odoo_dir/odoo-bin --config=$odoo_conf
 Restart=always
 RestartSec=5s
@@ -763,6 +793,31 @@ server {
         gzip_types text/css application/javascript;
     }
     
+    # WebSocket / 长轮询（Odoo 17 实时通信）
+    location /websocket {
+        proxy_pass http://odoo_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 86400s;
+    }
+
+    location /longpolling {
+        proxy_pass http://odoo_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 86400s;
+    }
+
     # 健康检查端点
     location /nginx-health {
         access_log off;
